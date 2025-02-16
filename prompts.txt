@@ -1,0 +1,233 @@
+main prompt:    
+
+I want a python REST APIs projects which services following endpoints
+
+endpoints:
+- /v1/video/caption - final output will be video with captions
+- /v1/video/transcribe - final output will be json with all subtitles with word level timestamps
+- /v1/video/share/{filename} - final output downloadable video link
+
+lets use Pydantic models for strict request/response schemas, request will have video url or file path,  ass settings, optional webhook_url, optional recordId, optional language default language will be English.
+
+ass settings is a sub class which will have ass format params:
+Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding. all of the fields should have default values for karaoke style 
+
+once the request is received, it will enter into queue with a jobId, once request is added to queue send response back with jobId, recordId, job status, message.
+
+the queue will be processed parallelly based resource availability of system, at least one process, max upto 3 process. this max should be configarable via config and env variables else default it to 3.
+
+there will be 5 steps for caption api:
+
+extract audio -> generate captions with wishper -> build ass file -> generate video with caption using ffmpeg.
+
+- extract audio using ffmpeg
+ - eg : command: ffmpeg -i input_video.mp4 -vn -ar 16000 -ac 1 -c:a mp3 -b:a 32k output.mp3
+- now generate audio file will be loaded to openAI wishper to generate segments with work level timestamps.
+- build ass file based of request ass settings params
+- generate video with caption using ffmpeg.
+- generate a downloadable/sharable url.
+
+all intermediate stage files will be stored in temp folder with {stage}_recordId/JobId.{extension} as file name if recordId is present add recordId to file name else use jobId.
+
+final output video should go to storage folder with captioned_recordId/JobId.{extension}.
+
+the path of temp and storage  should be picked from either config or env variable else default to ./temp and ./storage directory, create  directory if this not present.
+
+
+
+ refer poc codes just for reference: 
+```
+import whisper
+import ffmpeg
+import json
+
+def extract_audio(video_path):
+    audio_path = "temp_audio.mp3"
+    stream = ffmpeg.input(video_path)
+    stream = ffmpeg.output(stream, audio_path, 
+                          acodec='mp3', 
+                          ac=1, 
+                          ar='16k',
+                          ab='32k')
+    ffmpeg.run(stream, overwrite_output=True)
+    return audio_path
+
+def generate_subtitles(video_path, model_name="base"):
+    # Extract audio
+    audio_path = extract_audio(video_path)
+    
+    # Load Whisper model
+    model = whisper.load_model(model_name)
+    
+    # Transcribe with word-level timestamps
+    result = model.transcribe(audio_path, 
+                            word_timestamps=True,
+                            language="en")
+    
+    # Convert to JSON format
+    subtitle_json = {
+        "segments": [{
+            "start": segment["start"],
+            "end": segment["end"],
+            "text": segment["text"],
+            "words": segment.get("words", [])
+        } for segment in result["segments"]]
+    }
+    
+    # Save JSON file
+    output_file = f"{video_path.split('.')[0]}_subtitles.json"
+    with open(output_file, "w") as f:
+        json.dump(subtitle_json, f, indent=2)
+    
+    return output_file
+
+# Usage
+video_file = "input_video.mp4"
+generate_subtitles(video_file)
+---------------------------------------------------------------------------------------------
+import json
+
+def format_time(seconds):
+    """
+    Convert seconds to ASS time format: H:MM:SS.CS
+    """
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = seconds % 60
+    # Calculate centiseconds (two digits)
+    secs_int = int(secs)
+    centiseconds = int(round((secs - secs_int) * 100))
+    return f"{hours}:{minutes:02}:{secs_int:02}.{centiseconds:02}"
+
+def convert_json_to_ass(data):
+    """
+    Convert the provided JSON data (with segments and words) to an ASS karaoke file.
+    """
+    ass_lines = []
+    
+    # ASS Header (Script Info)
+    ass_lines.append("[Script Info]")
+    ass_lines.append("; Script Information")
+    ass_lines.append("Title: Multiple Karaoke Dialogues Example")
+    ass_lines.append("ScriptType: v4.00+")
+    ass_lines.append("PlayResX: 1280")
+    ass_lines.append("PlayResY: 720")
+    ass_lines.append("Timer: 100.0000")
+    ass_lines.append("")
+    
+    # ASS Styles
+    ass_lines.append("[V4+ Styles]")
+    ass_lines.append("; Define a style for the karaoke subtitles.")
+    ass_lines.append("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding")
+    ass_lines.append("Style: Karaoke,Arial,50,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1")
+    ass_lines.append("")
+    
+    # ASS Events
+    ass_lines.append("[Events]")
+    ass_lines.append("; Each Dialogue line represents one subtitle event with karaoke effects.")
+    ass_lines.append("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text")
+    
+    # Process each segment from the JSON data
+    for segment in data["segments"]:
+        start = segment["start"]
+        end = segment["end"]
+        start_time = format_time(start)
+        end_time = format_time(end)
+        
+        # Build karaoke text by adding {\k} tags before each word.
+        karaoke_text_parts = []
+        for word in segment["words"]:
+            # Calculate duration in centiseconds
+            duration_sec = word["end"] - word["start"]
+            duration_cs = int(round(duration_sec * 100))
+            # Append the {\k} tag and the word
+            karaoke_text_parts.append(f"{{\\k{duration_cs}}}{word['word']}")
+        karaoke_text = " ".join(karaoke_text_parts)
+        
+        dialogue_line = f"Dialogue: 0,{start_time},{end_time},Karaoke,,0,0,0,,{karaoke_text}"
+        ass_lines.append(dialogue_line)
+    
+    return "\n".join(ass_lines)
+
+if __name__ == "__main__":
+    # Example JSON data (normally, you'd load this from a file)
+    json_data = {
+      "segments": [
+        {
+          "id": 0,
+          "seek": 0,
+          "start": 0.0,
+          "end": 3.0,
+          "text": "Hello world, welcome to the demo.",
+          "words": [
+            {"word": "Hello", "start": 0.0, "end": 0.5, "confidence": 0.99},
+            {"word": "world,", "start": 0.6, "end": 1.0, "confidence": 0.98},
+            {"word": "welcome", "start": 1.1, "end": 1.5, "confidence": 0.97},
+            {"word": "to", "start": 1.6, "end": 1.8, "confidence": 0.96},
+            {"word": "the", "start": 1.9, "end": 2.0, "confidence": 0.96},
+            {"word": "demo.", "start": 2.1, "end": 3.0, "confidence": 0.95}
+          ]
+        },
+        {
+          "id": 1,
+          "seek": 1,
+          "start": 3.0,
+          "end": 6.0,
+          "text": "This is a sample output for word-level subtitles.",
+          "words": [
+            {"word": "This", "start": 3.0, "end": 3.3, "confidence": 0.98},
+            {"word": "is", "start": 3.4, "end": 3.6, "confidence": 0.97},
+            {"word": "a", "start": 3.7, "end": 3.8, "confidence": 0.96},
+            {"word": "sample", "start": 3.9, "end": 4.3, "confidence": 0.95},
+            {"word": "output", "start": 4.4, "end": 4.8, "confidence": 0.95},
+            {"word": "for", "start": 4.9, "end": 5.1, "confidence": 0.95},
+            {"word": "word-level", "start": 5.2, "end": 5.5, "confidence": 0.94},
+            {"word": "subtitles.", "start": 5.6, "end": 6.0, "confidence": 0.94}
+          ]
+        }
+      ]
+    }
+    
+    # Convert JSON to ASS content
+    ass_content = convert_json_to_ass(json_data)
+    
+    # Write the ASS file to disk
+    with open("output.ass", "w", encoding="utf-8") as f:
+        f.write(ass_content)
+    
+    print("Karaoke ASS file generated as 'output.ass'")
+
+
+
+```
+
+generate project with production code.
+
+
+
+
+----------------------------------------------------------
+
+more inputs:
+
+- can we follow single responsibility principle, lets have seperate packages with individual classes. for route, model, config, services,..etc
+- /v1/video/transcribe api will request json response post 2nd stage :
+ - extract audio -> generate captions with wishper 
+- can we use simple local queue for  process tasks, this applicatioon will run in single machine as of now
+- let's have cuda check, 
+ - ```
+import torch
+import whisper
+
+# Check CUDA availability
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# Load model with GPU support
+model = whisper.load_model("base").to(device)
+
+# Transcribe using the model
+result = model.transcribe("audio.mp3")
+```
+- lets manage whisper model through config and env variable.
+- all requests and response should be in json format.
+- if webhook like is provided, send response back to webhook link once process is done, else let have status endpoint, so that client can poll status and get response.

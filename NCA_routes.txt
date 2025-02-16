@@ -1,0 +1,1359 @@
+
+===== /Users/indrajagadeeshdurla/Downloads/no-code-architects-toolkit-main/routes/audio_mixing.py =====
+
+from flask import Blueprint
+from app_utils import *
+import logging
+from services.audio_mixing import process_audio_mixing
+from services.authentication import authenticate
+from services.cloud_storage import upload_file
+
+audio_mixing_bp = Blueprint('audio_mixing', __name__)
+logger = logging.getLogger(__name__)
+
+@audio_mixing_bp.route('/audio-mixing', methods=['POST'])
+@authenticate
+@validate_payload({
+    "type": "object",
+    "properties": {
+        "video_url": {"type": "string", "format": "uri"},
+        "audio_url": {"type": "string", "format": "uri"},
+        "video_vol": {"type": "number", "minimum": 0, "maximum": 100},
+        "audio_vol": {"type": "number", "minimum": 0, "maximum": 100},
+        "output_length": {"type": "string", "enum": ["video", "audio"]},
+        "webhook_url": {"type": "string", "format": "uri"},
+        "id": {"type": "string"}
+    },
+    "required": ["video_url", "audio_url"],
+    "additionalProperties": False
+})
+@queue_task_wrapper(bypass_queue=False)
+def audio_mixing(job_id, data):
+    video_url = data.get('video_url')
+    audio_url = data.get('audio_url')
+    video_vol = data.get('video_vol', 100)
+    audio_vol = data.get('audio_vol', 100)
+    output_length = data.get('output_length', 'video')
+    webhook_url = data.get('webhook_url')
+    id = data.get('id')
+
+    logger.info(f"Job {job_id}: Received audio mixing request for {video_url} and {audio_url}")
+
+    try:
+        # Process audio and video mixing
+        output_filename = process_audio_mixing(
+            video_url, audio_url, video_vol, audio_vol, output_length, job_id, webhook_url
+        )
+
+        # Upload the mixed file using the unified upload_file() method
+        cloud_url = upload_file(output_filename)
+
+        logger.info(f"Job {job_id}: Mixed media uploaded to cloud storage: {cloud_url}")
+
+        # Return the cloud URL for the uploaded file
+        return cloud_url, "/audio-mixing", 200
+        
+    except Exception as e:
+        logger.error(f"Job {job_id}: Error during audio mixing process - {str(e)}")
+        return str(e), "/audio-mixing", 500
+
+===== /Users/indrajagadeeshdurla/Downloads/no-code-architects-toolkit-main/routes/authenticate.py =====
+
+from flask import Blueprint, request, jsonify, current_app
+from app_utils import *
+from functools import wraps
+import os
+
+auth_bp = Blueprint('auth', __name__)
+
+API_KEY = os.environ.get('API_KEY')
+
+@auth_bp.route('/authenticate', methods=['GET'])
+@queue_task_wrapper(bypass_queue=True)
+def authenticate_endpoint(**kwargs):
+    api_key = request.headers.get('X-API-Key')
+    if api_key == API_KEY:
+        return "Authorized", "/authenticate", 200
+    else:
+        return "Unauthorized", "/authenticate", 401
+
+===== /Users/indrajagadeeshdurla/Downloads/no-code-architects-toolkit-main/routes/caption_video.py =====
+
+from flask import Blueprint, current_app
+from app_utils import *
+import logging
+from services.caption_video import process_captioning
+from services.authentication import authenticate
+from services.cloud_storage import upload_file
+import os
+
+caption_bp = Blueprint('caption', __name__)
+logger = logging.getLogger(__name__)
+
+@caption_bp.route('/caption-video', methods=['POST'])
+@authenticate
+@validate_payload({
+    "type": "object",
+    "properties": {
+        "video_url": {"type": "string", "format": "uri"},
+        "srt": {"type": "string"},
+        "ass": {"type": "string"},
+        "options": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "option": {"type": "string"},
+                    "value": {}  # Allow any type for value
+                },
+                "required": ["option", "value"]
+            }
+        },
+        "webhook_url": {"type": "string", "format": "uri"},
+        "id": {"type": "string"}
+    },
+    "required": ["video_url"],
+    "oneOf": [
+        {"required": ["srt"]},
+        {"required": ["ass"]}
+    ],
+    "additionalProperties": False
+})
+@queue_task_wrapper(bypass_queue=False)
+def caption_video(job_id, data):
+    video_url = data['video_url']
+    caption_srt = data.get('srt')
+    caption_ass = data.get('ass')
+    options = data.get('options', [])
+    webhook_url = data.get('webhook_url')
+    id = data.get('id')
+
+    logger.info(f"Job {job_id}: Received captioning request for {video_url}")
+    logger.info(f"Job {job_id}: Options received: {options}")
+
+    if caption_ass is not None:
+        captions = caption_ass
+        caption_type = "ass"
+    else:
+        captions = caption_srt
+        caption_type = "srt"
+
+    try:
+        output_filename = process_captioning(video_url, captions, caption_type, options, job_id)
+        logger.info(f"Job {job_id}: Captioning process completed successfully")
+
+        # Upload the captioned video using the unified upload_file() method
+        cloud_url = upload_file(output_filename)
+
+        logger.info(f"Job {job_id}: Captioned video uploaded to cloud storage: {cloud_url}")
+
+        # Return the cloud URL for the uploaded file
+        return cloud_url, "/caption-video", 200
+
+    except Exception as e:
+        logger.error(f"Job {job_id}: Error during captioning process - {str(e)}", exc_info=True)
+        return str(e), "/caption-video", 500
+
+===== /Users/indrajagadeeshdurla/Downloads/no-code-architects-toolkit-main/routes/combine_videos.py =====
+
+from flask import Blueprint
+from app_utils import *
+import logging
+from services.ffmpeg_toolkit import process_video_combination
+from services.authentication import authenticate
+from services.cloud_storage import upload_file
+
+combine_bp = Blueprint('combine', __name__)
+logger = logging.getLogger(__name__)
+
+@combine_bp.route('/combine-videos', methods=['POST'])
+@authenticate
+@validate_payload({
+    "type": "object",
+    "properties": {
+        "video_urls": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "video_url": {"type": "string", "format": "uri"}
+                },
+                "required": ["video_url"]
+            },
+            "minItems": 1
+        },
+        "webhook_url": {"type": "string", "format": "uri"},
+        "id": {"type": "string"}
+    },
+    "required": ["video_urls"],
+    "additionalProperties": False
+})
+@queue_task_wrapper(bypass_queue=False)
+def combine_videos(job_id, data):
+    media_urls = data['video_urls']
+    webhook_url = data.get('webhook_url')
+    id = data.get('id')
+
+    logger.info(f"Job {job_id}: Received combine-videos request for {len(media_urls)} videos")
+
+    try:
+        output_file = process_video_combination(media_urls, job_id)
+        logger.info(f"Job {job_id}: Video combination process completed successfully")
+
+        cloud_url = upload_file(output_file)
+        logger.info(f"Job {job_id}: Combined video uploaded to cloud storage: {cloud_url}")
+
+        return cloud_url, "/combine-videos", 200
+
+    except Exception as e:
+        logger.error(f"Job {job_id}: Error during video combination process - {str(e)}")
+        return str(e), "/combine-videos", 500
+===== /Users/indrajagadeeshdurla/Downloads/no-code-architects-toolkit-main/routes/extract_keyframes.py =====
+
+from flask import Blueprint
+from app_utils import *
+import logging
+from services.extract_keyframes import process_keyframe_extraction
+from services.authentication import authenticate
+from services.cloud_storage import upload_file
+
+extract_keyframes_bp = Blueprint('extract_keyframes', __name__)
+logger = logging.getLogger(__name__)
+
+@extract_keyframes_bp.route('/extract-keyframes', methods=['POST'])
+@authenticate
+@validate_payload({
+    "type": "object",
+    "properties": {
+        "video_url": {"type": "string", "format": "uri"},
+        "webhook_url": {"type": "string", "format": "uri"},
+        "id": {"type": "string"}
+    },
+    "required": ["video_url"],
+    "additionalProperties": False
+})
+@queue_task_wrapper(bypass_queue=False)
+def extract_keyframes(job_id, data):
+    video_url = data.get('video_url')
+    webhook_url = data.get('webhook_url')
+    id = data.get('id')
+
+    logger.info(f"Job {job_id}: Received keyframe extraction request for {video_url}")
+
+    try:
+        # Process keyframe extraction
+        image_paths = process_keyframe_extraction(video_url, job_id)
+
+        # Upload each extracted keyframe and collect the cloud URLs
+        image_urls = []
+        for image_path in image_paths:
+            cloud_url = upload_file(image_path)
+            image_urls.append({"image_url": cloud_url})
+
+        logger.info(f"Job {job_id}: Keyframes uploaded to cloud storage")
+
+        # Return the URLs of the uploaded keyframes
+        return {"image_urls": image_urls}, "/extract-keyframes", 200
+        
+    except Exception as e:
+        logger.error(f"Job {job_id}: Error during keyframe extraction - {str(e)}")
+        return str(e), "/extract-keyframes", 500
+
+===== /Users/indrajagadeeshdurla/Downloads/no-code-architects-toolkit-main/routes/gdrive_upload.py =====
+
+import os
+import logging
+from flask import Blueprint, request, jsonify
+import threading
+import requests
+import uuid
+import json
+from google.oauth2.service_account import Credentials
+from google.auth.transport.requests import Request
+from datetime import datetime
+import time
+import psutil
+from services.authentication import authenticate
+from app_utils import validate_payload, queue_task_wrapper
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Define the blueprint
+gdrive_upload_bp = Blueprint('gdrive_upload', __name__)
+
+# Environment variables
+GCP_SA_CREDENTIALS = os.getenv('GCP_SA_CREDENTIALS')
+GDRIVE_USER = os.getenv('GDRIVE_USER')
+
+# Class to track upload progress
+class UploadProgress:
+    def __init__(self, job_id, total_size):
+        self.job_id = job_id
+        self.total_size = total_size
+        self.bytes_uploaded = 0
+        self.start_time = time.time()
+        self.lock = threading.Lock()
+        self.last_logged_percentage = 0
+        self.last_logged_resource_percentage = 0  # For memory/disk logging every 5%
+
+# Global list to keep track of active uploads
+active_uploads = []
+uploads_lock = threading.Lock()
+
+def get_access_token():
+    """
+    Retrieves an access token for Google APIs using service account credentials.
+    """
+    credentials_info = json.loads(GCP_SA_CREDENTIALS)
+    credentials = Credentials.from_service_account_info(
+        credentials_info,
+        scopes=['https://www.googleapis.com/auth/drive']
+    )
+    delegated_credentials = credentials.with_subject(GDRIVE_USER)
+    if not delegated_credentials.valid or delegated_credentials.expired:
+        delegated_credentials.refresh(Request())
+    access_token = delegated_credentials.token
+    return access_token
+
+def initiate_resumable_upload(filename, folder_id, mime_type='application/octet-stream'):
+    """
+    Initiates a resumable upload session with Google Drive and returns the upload URL.
+    """
+    url = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable'
+    headers = {
+        'Authorization': f'Bearer {get_access_token()}',
+        'Content-Type': 'application/json; charset=UTF-8',
+        'X-Upload-Content-Type': mime_type
+    }
+    metadata = {
+        'name': filename,
+        'parents': [folder_id]
+    }
+    response = requests.post(url, headers=headers, data=json.dumps(metadata))
+    response.raise_for_status()
+    upload_url = response.headers['Location']
+    return upload_url
+
+def upload_file_in_chunks(file_url, upload_url, total_size, job_id, chunk_size):
+    """
+    Uploads the file to Google Drive in chunks by streaming data directly from the source URL.
+    """
+    bytes_uploaded = 0
+    max_retries = 5
+    retry_delay = 5  # seconds
+
+    progress = UploadProgress(job_id, total_size)
+
+    # Add progress to active_uploads
+    with uploads_lock:
+        active_uploads.append(progress)
+
+    try:
+        with requests.get(file_url, stream=True) as r:
+            r.raise_for_status()
+            iterator = r.iter_content(chunk_size=chunk_size)
+            for chunk in iterator:
+                if chunk:
+                    for attempt in range(max_retries):
+                        start = bytes_uploaded
+                        end = bytes_uploaded + len(chunk) - 1
+                        content_range = f'bytes {start}-{end}/{total_size}'
+                        headers = {
+                            'Content-Length': str(len(chunk)),
+                            'Content-Range': content_range,
+                        }
+                        try:
+                            upload_response = requests.put(
+                                upload_url,
+                                headers=headers,
+                                data=chunk
+                            )
+                            if upload_response.status_code in (200, 201):
+                                # Upload complete
+                                logger.info(f"Job {job_id}: Upload complete.")
+                                with progress.lock:
+                                    progress.bytes_uploaded = end + 1
+                                return upload_response.json()['id']
+                            elif upload_response.status_code == 308:
+                                # Resumable upload incomplete
+                                bytes_uploaded = end + 1
+                                with progress.lock:
+                                    progress.bytes_uploaded = bytes_uploaded
+                                break  # Break retry loop and continue with next chunk
+                            else:
+                                # Handle unexpected status codes
+                                logger.error(f"Job {job_id}: Unexpected status code: {upload_response.status_code}")
+                                raise Exception(f"Upload failed with status code {upload_response.status_code}")
+                        except requests.exceptions.RequestException as e:
+                            logger.error(f"Job {job_id}: Network error during upload: {e}")
+                            if attempt < max_retries - 1:
+                                logger.info(f"Job {job_id}: Retrying upload chunk after {retry_delay} seconds...")
+                                time.sleep(retry_delay)
+                                continue
+                            else:
+                                logger.error(f"Job {job_id}: Max retries reached. Upload failed.")
+                                raise
+                    else:
+                        # If we exhausted retries, exit the function
+                        raise Exception("Failed to upload chunk after multiple retries.")
+    finally:
+        # Remove progress from active_uploads
+        with uploads_lock:
+            if progress in active_uploads:
+                active_uploads.remove(progress)
+
+@gdrive_upload_bp.route('/gdrive-upload', methods=['POST'])
+@authenticate
+@validate_payload({
+    "type": "object",
+    "properties": {
+        "file_url": {"type": "string", "format": "uri"},
+        "filename": {"type": "string"},
+        "folder_id": {"type": "string"},
+        "mime_type": {"type": "string"},
+        "chunk_size": {"type": "integer", "minimum": 1},
+        "webhook_url": {"type": "string", "format": "uri"},
+        "id": {"type": "string"}
+    },
+    "required": ["file_url", "filename", "folder_id"],
+    "additionalProperties": False
+})
+@queue_task_wrapper(bypass_queue=False)
+def gdrive_upload(job_id, data):
+    logger.info(f"Processing Job ID: {job_id}")
+
+    if not GDRIVE_USER:
+        logger.error("GDRIVE_USER environment variable is not set")
+        return "GDRIVE_USER environment variable is not set", "/gdrive-upload", 400
+
+    try:
+        file_url = data['file_url']
+        filename = data['filename']
+        folder_id = data['folder_id']
+        mime_type = data.get('mime_type', 'application/octet-stream')
+        chunk_size = data.get('chunk_size', 5 * 1024 * 1024)  # Default to 5 MB
+
+        # Get the total size of the file
+        try:
+            head_response = requests.head(file_url, allow_redirects=True, timeout=30)
+            head_response.raise_for_status()
+            total_size = int(head_response.headers.get('Content-Length', 0))
+            
+            get_response = requests.get(file_url, stream=True, timeout=30)
+            get_response.raise_for_status()
+            total_size = int(get_response.headers.get('Content-Length', 0))
+            if total_size == 0:
+                raise ValueError("Content-Length header is missing or zero")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Job {job_id}: Error accessing file URL: {str(e)}")
+            return f"Error accessing file URL: {str(e)}", "/gdrive-upload", 500
+        except ValueError as e:
+            logger.error(f"Job {job_id}: {str(e)}")
+            return f"Unable to determine file size: {str(e)}", "/gdrive-upload", 500
+
+        logger.info(f"Job {job_id}: File size determined: {total_size} bytes")
+
+        # Initiate upload session
+        upload_url = initiate_resumable_upload(filename, folder_id, mime_type)
+        logger.info(f"Job {job_id}: Resumable upload session initiated with chunk size {chunk_size} bytes.")
+
+        # Upload file in chunks
+        file_id = upload_file_in_chunks(file_url, upload_url, total_size, job_id, chunk_size)
+
+        return file_id, "/gdrive-upload", 200
+
+    except Exception as e:
+        logger.error(f"Job {job_id}: Error during processing - {str(e)}")
+        return str(e), "/gdrive-upload", 500
+
+def log_system_resources():
+    """
+    Logs system resource usage and upload progress at regular intervals.
+    """
+    while True:
+        # Get memory and disk usage
+        memory_info = psutil.virtual_memory()
+        disk_info = psutil.disk_usage('/')
+
+        with uploads_lock:
+            for progress in active_uploads:
+                with progress.lock:
+                    # Calculate the percentage uploaded
+                    percentage = (progress.bytes_uploaded / progress.total_size) * 100 if progress.total_size > 0 else 0
+                    elapsed_time = time.time() - progress.start_time
+
+                    # Log upload progress every 1%
+                    if int(percentage) >= progress.last_logged_percentage + 1:
+                        progress.last_logged_percentage = int(percentage)
+                        logger.info(
+                            f"Job {progress.job_id}: Uploaded {progress.bytes_uploaded} of {progress.total_size} bytes "
+                            f"({percentage:.2f}%), Elapsed Time: {int(elapsed_time)} seconds"
+                        )
+
+                    # Log system resource usage every 5%
+                    if int(percentage) >= progress.last_logged_resource_percentage + 5:
+                        progress.last_logged_resource_percentage = int(percentage)
+                        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        logger.info(f"[{current_time}] Memory Usage: {memory_info.percent}% used")
+                        logger.info(f"[{current_time}] Disk Usage: {disk_info.percent}% used")
+
+        # Sleep for 1 second before the next update
+        time.sleep(1)
+
+# Start the resource logging in a separate thread
+resource_logging_thread = threading.Thread(
+    target=log_system_resources,
+    daemon=True
+)
+resource_logging_thread.start()
+===== /Users/indrajagadeeshdurla/Downloads/no-code-architects-toolkit-main/routes/image_to_video.py =====
+
+from flask import Blueprint
+from app_utils import *
+import logging
+from services.image_to_video import process_image_to_video
+from services.authentication import authenticate
+from services.cloud_storage import upload_file
+
+image_to_video_bp = Blueprint('image_to_video', __name__)
+logger = logging.getLogger(__name__)
+
+@image_to_video_bp.route('/image-to-video', methods=['POST'])
+@authenticate
+@validate_payload({
+    "type": "object",
+    "properties": {
+        "image_url": {"type": "string", "format": "uri"},
+        "length": {"type": "number", "minimum": 1, "maximum": 60},
+        "frame_rate": {"type": "integer", "minimum": 15, "maximum": 60},
+        "zoom_speed": {"type": "number", "minimum": 0, "maximum": 100},
+        "webhook_url": {"type": "string", "format": "uri"},
+        "id": {"type": "string"}
+    },
+    "required": ["image_url"],
+    "additionalProperties": False
+})
+@queue_task_wrapper(bypass_queue=False)
+def image_to_video(job_id, data):
+    image_url = data.get('image_url')
+    length = data.get('length', 5)
+    frame_rate = data.get('frame_rate', 30)
+    zoom_speed = data.get('zoom_speed', 3) / 100
+    webhook_url = data.get('webhook_url')
+    id = data.get('id')
+
+    logger.info(f"Job {job_id}: Received image to video request for {image_url}")
+
+    try:
+        # Process image to video conversion
+        output_filename = process_image_to_video(
+            image_url, length, frame_rate, zoom_speed, job_id, webhook_url
+        )
+
+        # Upload the resulting file using the unified upload_file() method
+        cloud_url = upload_file(output_filename)
+
+        # Log the successful upload
+        logger.info(f"Job {job_id}: Converted video uploaded to cloud storage: {cloud_url}")
+
+        # Return the cloud URL for the uploaded file
+        return cloud_url, "/image-to-video", 200
+        
+    except Exception as e:
+        logger.error(f"Job {job_id}: Error processing image to video: {str(e)}", exc_info=True)
+        return str(e), "/image-to-video", 500
+
+===== /Users/indrajagadeeshdurla/Downloads/no-code-architects-toolkit-main/routes/media_to_mp3.py =====
+
+# routes/media_to_mp3.py
+from flask import Blueprint, current_app
+from app_utils import *
+import logging
+from services.ffmpeg_toolkit import process_conversion
+from services.authentication import authenticate
+from services.cloud_storage import upload_file
+import os
+
+convert_bp = Blueprint('convert', __name__)
+logger = logging.getLogger(__name__)
+
+@convert_bp.route('/media-to-mp3', methods=['POST'])
+@authenticate
+@validate_payload({
+    "type": "object",
+    "properties": {
+        "media_url": {"type": "string", "format": "uri"},
+        "webhook_url": {"type": "string", "format": "uri"},
+        "id": {"type": "string"},
+        "bitrate": {"type": "string", "pattern": "^[0-9]+k$"}
+    },
+    "required": ["media_url"],
+    "additionalProperties": False
+})
+@queue_task_wrapper(bypass_queue=False)
+def convert_media_to_mp3(job_id, data):
+    media_url = data['media_url']
+    webhook_url = data.get('webhook_url')
+    id = data.get('id')
+    bitrate = data.get('bitrate', '128k')
+
+    logger.info(f"Job {job_id}: Received media-to-mp3 request for media URL: {media_url}")
+
+    try:
+        output_file = process_conversion(media_url, job_id, bitrate)
+        logger.info(f"Job {job_id}: Media conversion process completed successfully")
+
+        cloud_url = upload_file(output_file)
+        logger.info(f"Job {job_id}: Converted media uploaded to cloud storage: {cloud_url}")
+
+        return cloud_url, "/media-to-mp3", 200
+
+    except Exception as e:
+        logger.error(f"Job {job_id}: Error during media conversion process - {str(e)}")
+        return str(e), "/media-to-mp3", 500
+===== /Users/indrajagadeeshdurla/Downloads/no-code-architects-toolkit-main/routes/transcribe_media.py =====
+
+from flask import Blueprint
+from app_utils import *
+import logging
+import os
+from services.transcription import process_transcription
+from services.authentication import authenticate
+from services.cloud_storage import upload_file
+
+transcribe_bp = Blueprint('transcribe', __name__)
+logger = logging.getLogger(__name__)
+
+@transcribe_bp.route('/transcribe-media', methods=['POST'])
+@authenticate
+@validate_payload({
+    "type": "object",
+    "properties": {
+        "media_url": {"type": "string", "format": "uri"},
+        "output": {"type": "string", "enum": ["transcript", "srt", "vtt", "ass"]},
+        "webhook_url": {"type": "string", "format": "uri"},
+        "max_chars": {"type": "integer"},
+        "id": {"type": "string"}
+    },
+    "required": ["media_url"],
+    "additionalProperties": False
+})
+@queue_task_wrapper(bypass_queue=False)
+def transcribe(job_id, data):
+    media_url = data['media_url']
+    output = data.get('output', 'transcript')
+    webhook_url = data.get('webhook_url')
+    max_chars = data.get('max_chars', 56)
+    id = data.get('id')
+
+    logger.info(f"Job {job_id}: Received transcription request for {media_url}")
+
+    try:
+        result = process_transcription(media_url, output, max_chars)
+        logger.info(f"Job {job_id}: Transcription process completed successfully")
+
+        # If the result is a file path, upload it using the unified upload_file() method
+        if output in ['srt', 'vtt', 'ass']:
+            cloud_url = upload_file(result)
+            os.remove(result)  # Remove the temporary file after uploading
+            return cloud_url, "/transcribe-media", 200
+        else:
+            return result, "/transcribe-media", 200
+        
+    except Exception as e:
+        logger.error(f"Job {job_id}: Error during transcription process - {str(e)}")
+        return str(e), "/transcribe-media", 500
+
+===== /Users/indrajagadeeshdurla/Downloads/no-code-architects-toolkit-main/routes/v1/code/execute/execute_python.py =====
+
+import os
+import logging
+from flask import Blueprint, request
+from services.authentication import authenticate
+from app_utils import validate_payload, queue_task_wrapper
+import subprocess
+import tempfile
+import json
+import textwrap
+
+v1_code_execute_bp = Blueprint('v1_code_execute', __name__)
+logger = logging.getLogger(__name__)
+
+@v1_code_execute_bp.route('/v1/code/execute/python', methods=['POST'])
+@authenticate
+@validate_payload({
+    "type": "object",
+    "properties": {
+        "code": {"type": "string"},
+        "timeout": {"type": "integer", "minimum": 1, "maximum": 300},
+        "webhook_url": {"type": "string", "format": "uri"},
+        "id": {"type": "string"}
+    },
+    "required": ["code"],
+    "additionalProperties": False
+})
+@queue_task_wrapper(bypass_queue=False)
+def execute_python(job_id, data):
+    logger.info(f"Job {job_id}: Received Python code execution request")
+    
+    try:
+        code = data['code']
+        timeout = data.get('timeout', 30)
+        
+        # Indent user code
+        indented_code = textwrap.indent(code, '    ')
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as temp_file:
+            template = '''import sys
+import json
+from io import StringIO
+import contextlib
+
+@contextlib.contextmanager
+def capture_output():
+    stdout, stderr = StringIO(), StringIO()
+    old_out, old_err = sys.stdout, sys.stderr
+    try:
+        sys.stdout, sys.stderr = stdout, stderr
+        yield stdout, stderr
+    finally:
+        sys.stdout, sys.stderr = old_out, old_err
+
+def execute_code():
+{}
+
+with capture_output() as (stdout, stderr):
+    try:
+        result_value = execute_code()
+    except Exception as e:
+        print(f"Error: {{str(e)}}", file=sys.stderr)
+        result_value = None
+
+result = {{
+    'stdout': stdout.getvalue(),
+    'stderr': stderr.getvalue(),
+    'return_value': result_value
+}}
+print(json.dumps(result))
+'''
+            
+            final_code = template.format(indented_code)
+            temp_file.write(final_code)
+            temp_file.flush()
+            
+            # Log the generated code for debugging
+            logger.debug(f"Generated code:\n{final_code}")
+            
+            try:
+                result = subprocess.run(
+                    ['python3', temp_file.name],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout
+                )
+                
+                try:
+                    output = json.loads(result.stdout)
+                    if result.returncode != 0 or output['stderr']:
+                        return {
+                            'error': output['stderr'] or 'Execution failed',
+                            'stdout': output['stdout'],
+                            'exit_code': result.returncode
+                        }, '/v1/code/execute/python', 400
+                    
+                    return {
+                        'result': output['return_value'],
+                        'stdout': output['stdout'],
+                        'stderr': output['stderr'],
+                        'exit_code': result.returncode
+                    }, '/v1/code/execute/python', 200
+                    
+                except json.JSONDecodeError:
+                    return {
+                        'error': 'Failed to parse execution result',
+                        'stdout': result.stdout,
+                        'stderr': result.stderr,
+                        'exit_code': result.returncode
+                    }, '/v1/code/execute/python', 500
+                    
+            except subprocess.TimeoutExpired:
+                return {"error": f"Execution timed out after {timeout} seconds"}, '/v1/code/execute/python', 408
+            except subprocess.SubprocessError as e:
+                return {"error": f"Execution failed: {str(e)}"}, '/v1/code/execute/python', 500
+            
+    except Exception as e:
+        logger.error(f"Job {job_id}: Error executing Python code: {str(e)}")
+        return {"error": str(e)}, '/v1/code/execute/python', 500
+        
+    finally:
+        if 'temp_file' in locals():
+            os.unlink(temp_file.name)
+===== /Users/indrajagadeeshdurla/Downloads/no-code-architects-toolkit-main/routes/v1/ffmpeg/ffmpeg_compose.py =====
+
+import os
+import logging
+from flask import Blueprint, request, jsonify
+from app_utils import *
+from services.v1.ffmpeg.ffmpeg_compose import process_ffmpeg_compose
+from services.authentication import authenticate
+from services.cloud_storage import upload_file
+
+v1_ffmpeg_compose_bp = Blueprint('v1_ffmpeg_compose', __name__)
+logger = logging.getLogger(__name__)
+
+@v1_ffmpeg_compose_bp.route('/v1/ffmpeg/compose', methods=['POST'])
+@authenticate
+@validate_payload({
+    "type": "object",
+    "properties": {
+        "inputs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "file_url": {"type": "string", "format": "uri"},
+                    "options": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "option": {"type": "string"},
+                                "argument": {"type": ["string", "number", "null"]}
+                            },
+                            "required": ["option"]
+                        }
+                    }
+                },
+                "required": ["file_url"]
+            },
+            "minItems": 1
+        },
+        "filters": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "filter": {"type": "string"}
+                },
+                "required": ["filter"]
+            }
+        },
+        "outputs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "options": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "option": {"type": "string"},
+                                "argument": {"type": ["string", "number", "null"]}
+                            },
+                            "required": ["option"]
+                        }
+                    }
+                },
+                "required": ["options"]
+            },
+            "minItems": 1
+        },
+        "global_options": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "option": {"type": "string"},
+                    "argument": {"type": ["string", "number", "null"]}
+                },
+                "required": ["option"]
+            }
+        },
+        "metadata": {
+            "type": "object",
+            "properties": {
+                "thumbnail": {"type": "boolean"},
+                "filesize": {"type": "boolean"},
+                "duration": {"type": "boolean"},
+                "bitrate": {"type": "boolean"},
+                "encoder": {"type": "boolean"}
+            }
+        },
+        "webhook_url": {"type": "string", "format": "uri"},
+        "id": {"type": "string"}
+    },
+    "required": ["inputs", "outputs"],
+    "additionalProperties": False
+})
+@queue_task_wrapper(bypass_queue=False)
+def ffmpeg_api(job_id, data):
+    logger.info(f"Job {job_id}: Received flexible FFmpeg request")
+
+    try:
+        output_filenames, metadata = process_ffmpeg_compose(data, job_id)
+        
+        # Upload output files to GCP and create result array
+        output_urls = []
+        for i, output_filename in enumerate(output_filenames):
+            if os.path.exists(output_filename):
+                upload_url = upload_file(output_filename)
+                output_info = {"file_url": upload_url}
+                
+                if metadata and i < len(metadata):
+                    output_metadata = metadata[i]
+                    if 'thumbnail' in output_metadata:
+                        thumbnail_path = output_metadata['thumbnail']
+                        if os.path.exists(thumbnail_path):
+                            thumbnail_url = upload_file(thumbnail_path)
+                            del output_metadata['thumbnail']
+                            output_metadata['thumbnail_url'] = thumbnail_url
+                            os.remove(thumbnail_path)  # Clean up local thumbnail file
+                    output_info.update(output_metadata)
+                
+                output_urls.append(output_info)
+                os.remove(output_filename)  # Clean up local output file after upload
+            else:
+                raise Exception(f"Expected output file {output_filename} not found")
+
+        return output_urls, "/v1/ffmpeg/compose", 200
+        
+    except Exception as e:
+        logger.error(f"Job {job_id}: Error processing FFmpeg request - {str(e)}")
+        return str(e), "/v1/ffmpeg/compose", 500
+===== /Users/indrajagadeeshdurla/Downloads/no-code-architects-toolkit-main/routes/v1/image/transform/image_to_video.py =====
+
+from flask import Blueprint
+from app_utils import *
+import logging
+from services.v1.image.transform.image_to_video import process_image_to_video
+from services.authentication import authenticate
+from services.cloud_storage import upload_file
+
+v1_image_transform_video_bp = Blueprint('v1_image_transform_video', __name__)
+logger = logging.getLogger(__name__)
+
+@v1_image_transform_video_bp.route('/v1/image/transform/video', methods=['POST'])
+@authenticate
+@validate_payload({
+    "type": "object",
+    "properties": {
+        "image_url": {"type": "string", "format": "uri"},
+        "length": {"type": "number", "minimum": 1, "maximum": 60},
+        "frame_rate": {"type": "integer", "minimum": 15, "maximum": 60},
+        "zoom_speed": {"type": "number", "minimum": 0, "maximum": 100},
+        "webhook_url": {"type": "string", "format": "uri"},
+        "id": {"type": "string"}
+    },
+    "required": ["image_url"],
+    "additionalProperties": False
+})
+@queue_task_wrapper(bypass_queue=False)
+def image_to_video(job_id, data):
+    image_url = data.get('image_url')
+    length = data.get('length', 5)
+    frame_rate = data.get('frame_rate', 30)
+    zoom_speed = data.get('zoom_speed', 3) / 100
+    webhook_url = data.get('webhook_url')
+    id = data.get('id')
+
+    logger.info(f"Job {job_id}: Received image to video request for {image_url}")
+
+    try:
+        # Process image to video conversion
+        output_filename = process_image_to_video(
+            image_url, length, frame_rate, zoom_speed, job_id, webhook_url
+        )
+
+        # Upload the resulting file using the unified upload_file() method
+        cloud_url = upload_file(output_filename)
+
+        # Log the successful upload
+        logger.info(f"Job {job_id}: Converted video uploaded to cloud storage: {cloud_url}")
+
+        # Return the cloud URL for the uploaded file
+        return cloud_url, "/v1/image/transform/video", 200
+        
+    except Exception as e:
+        logger.error(f"Job {job_id}: Error processing image to video: {str(e)}", exc_info=True)
+        return str(e), "/v1/image/transform/video", 500
+
+===== /Users/indrajagadeeshdurla/Downloads/no-code-architects-toolkit-main/routes/v1/media/media_transcribe.py =====
+
+from flask import Blueprint
+from app_utils import *
+import logging
+import os
+from services.v1.media.media_transcribe import process_transcribe_media
+from services.authentication import authenticate
+from services.cloud_storage import upload_file
+
+v1_media_transcribe_bp = Blueprint('v1_media_transcribe', __name__)
+logger = logging.getLogger(__name__)
+
+@v1_media_transcribe_bp.route('/v1/media/transcribe', methods=['POST'])
+@authenticate
+@validate_payload({
+    "type": "object",
+    "properties": {
+        "media_url": {"type": "string", "format": "uri"},
+        "task": {"type": "string", "enum": ["transcribe", "translate"]},
+        "include_text": {"type": "boolean"},
+        "include_srt": {"type": "boolean"},
+        "include_segments": {"type": "boolean"},
+        "word_timestamps": {"type": "boolean"},
+        "response_type": {"type": "string", "enum": ["direct", "cloud"]},
+        "language": {"type": "string"},
+        "webhook_url": {"type": "string", "format": "uri"},
+        "id": {"type": "string"}
+    },
+    "required": ["media_url"],
+    "additionalProperties": False
+})
+@queue_task_wrapper(bypass_queue=False)
+def transcribe(job_id, data):
+    media_url = data['media_url']
+    task = data.get('task', 'transcribe')
+    include_text = data.get('include_text', True)
+    include_srt = data.get('include_srt', False)
+    include_segments = data.get('include_segments', False)
+    word_timestamps = data.get('word_timestamps', False)
+    response_type = data.get('response_type', 'direct')
+    language = data.get('language', None)
+    webhook_url = data.get('webhook_url')
+    id = data.get('id')
+
+    logger.info(f"Job {job_id}: Received transcription request for {media_url}")
+
+    try:
+        result = process_transcribe_media(media_url, task, include_text, include_srt, include_segments, word_timestamps, response_type, language, job_id)
+        logger.info(f"Job {job_id}: Transcription process completed successfully")
+
+        # If the result is a file path, upload it using the unified upload_file() method
+        if response_type == "direct":
+           
+            result_json = {
+                "text": result[0],
+                "srt": result[1],
+                "segments": result[2],
+                "text_url": None,
+                "srt_url": None,
+                "segments_url": None,
+            }
+
+            return result_json, "/v1/transcribe/media", 200
+
+        else:
+
+            cloud_urls = {
+                "text": None,
+                "srt": None,
+                "segments": None,
+                "text_url": upload_file(result[0]) if include_text is True else None,
+                "srt_url": upload_file(result[1]) if include_srt is True else None,
+                "segments_url": upload_file(result[2]) if include_segments is True else None,
+            }
+
+            if include_text is True:
+                os.remove(result[0])  # Remove the temporary file after uploading
+            
+            if include_srt is True:
+                os.remove(result[1])
+
+            if include_segments is True:
+                os.remove(result[2])
+            
+            return cloud_urls, "/v1/transcribe/media", 200
+
+    except Exception as e:
+        logger.error(f"Job {job_id}: Error during transcription process - {str(e)}")
+        return str(e), "/v1/transcribe/media", 500
+
+===== /Users/indrajagadeeshdurla/Downloads/no-code-architects-toolkit-main/routes/v1/media/transform/media_to_mp3.py =====
+
+# routes/media_to_mp3.py
+from flask import Blueprint, current_app
+from app_utils import *
+import logging
+from services.v1.media.transform.media_to_mp3 import process_media_to_mp3
+from services.authentication import authenticate
+from services.cloud_storage import upload_file
+import os
+
+v1_media_transform_mp3_bp = Blueprint('v1_media_transform', __name__)
+logger = logging.getLogger(__name__)
+
+@v1_media_transform_mp3_bp.route('/v1/media/transform/mp3', methods=['POST'])
+@authenticate
+@validate_payload({
+    "type": "object",
+    "properties": {
+        "media_url": {"type": "string", "format": "uri"},
+        "webhook_url": {"type": "string", "format": "uri"},
+        "id": {"type": "string"},
+        "bitrate": {"type": "string", "pattern": "^[0-9]+k$"}
+    },
+    "required": ["media_url"],
+    "additionalProperties": False
+})
+@queue_task_wrapper(bypass_queue=False)
+def convert_media_to_mp3(job_id, data):
+    media_url = data['media_url']
+    webhook_url = data.get('webhook_url')
+    id = data.get('id')
+    bitrate = data.get('bitrate', '128k')
+
+    logger.info(f"Job {job_id}: Received media-to-mp3 request for media URL: {media_url}")
+
+    try:
+        output_file = process_media_to_mp3(media_url, job_id, bitrate)
+        logger.info(f"Job {job_id}: Media conversion process completed successfully")
+
+        cloud_url = upload_file(output_file)
+        logger.info(f"Job {job_id}: Converted media uploaded to cloud storage: {cloud_url}")
+
+        return cloud_url, "/v1/media/transform/mp3", 200
+
+    except Exception as e:
+        logger.error(f"Job {job_id}: Error during media conversion process - {str(e)}")
+        return str(e), "/v1/media/transform/mp3", 500
+===== /Users/indrajagadeeshdurla/Downloads/no-code-architects-toolkit-main/routes/v1/toolkit/authenticate.py =====
+
+from flask import Blueprint, request, jsonify, current_app
+from app_utils import *
+from functools import wraps
+import os
+
+v1_toolkit_auth_bp = Blueprint('v1_toolkit_auth', __name__)
+
+API_KEY = os.environ.get('API_KEY')
+
+@v1_toolkit_auth_bp.route('/v1/toolkit/authenticate', methods=['GET'])
+@queue_task_wrapper(bypass_queue=True)
+def authenticate_endpoint(**kwargs):
+    api_key = request.headers.get('X-API-Key')
+    if api_key == API_KEY:
+        return "Authorized", "/authenticate", 200
+    else:
+        return "Unauthorized", "/authenticate", 401
+
+===== /Users/indrajagadeeshdurla/Downloads/no-code-architects-toolkit-main/routes/v1/toolkit/test.py =====
+
+import os
+import logging
+from flask import Blueprint
+from services.authentication import authenticate
+from services.cloud_storage import upload_file
+from app_utils import queue_task_wrapper
+
+v1_toolkit_test_bp = Blueprint('v1_toolkit_test', __name__)
+logger = logging.getLogger(__name__)
+
+STORAGE_PATH = "/tmp/"
+
+@v1_toolkit_test_bp.route('/v1/toolkit/test', methods=['GET'])
+@authenticate
+@queue_task_wrapper(bypass_queue=False)
+def test_api(job_id, data):
+    logger.info(f"Job {job_id}: Testing NCA Toolkit API setup")
+    
+    try:
+        # Create test file
+        test_filename = os.path.join(STORAGE_PATH, "success.txt")
+        with open(test_filename, 'w') as f:
+            f.write("You have successfully installed the NCA Toolkit API, great job!")
+        
+        # Upload file to cloud storage
+        upload_url = upload_file(test_filename)
+        
+        # Clean up local file
+        os.remove(test_filename)
+        
+        return upload_url, "/v1/toolkit/test", 200
+        
+    except Exception as e:
+        logger.error(f"Job {job_id}: Error testing API setup - {str(e)}")
+        return str(e), "/v1/toolkit/test", 500
+===== /Users/indrajagadeeshdurla/Downloads/no-code-architects-toolkit-main/routes/v1/video/caption_video.py =====
+
+from flask import Blueprint, jsonify
+from app_utils import validate_payload, queue_task_wrapper
+import logging
+from services.v1.video.caption_video import process_captioning_v1
+from services.authentication import authenticate
+from services.cloud_storage import upload_file
+import os
+import requests  # Ensure requests is imported for webhook handling
+
+v1_video_caption_bp = Blueprint('v1_video/caption', __name__)
+logger = logging.getLogger(__name__)
+
+@v1_video_caption_bp.route('/v1/video/caption', methods=['POST'])
+@authenticate
+@validate_payload({
+    "type": "object",
+    "properties": {
+        "video_url": {"type": "string", "format": "uri"},
+        "captions": {"type": "string"},
+        "settings": {
+            "type": "object",
+            "properties": {
+                "line_color": {"type": "string"},
+                "word_color": {"type": "string"},
+                "outline_color": {"type": "string"},
+                "all_caps": {"type": "boolean"},
+                "max_words_per_line": {"type": "integer"},
+                "x": {"type": "integer"},
+                "y": {"type": "integer"},
+                "position": {
+                    "type": "string",
+                    "enum": [
+                        "bottom_left", "bottom_center", "bottom_right",
+                        "middle_left", "middle_center", "middle_right",
+                        "top_left", "top_center", "top_right"
+                    ]
+                },
+                "alignment": {
+                    "type": "string",
+                    "enum": ["left", "center", "right"]
+                },
+                "font_family": {"type": "string"},
+                "font_size": {"type": "integer"},
+                "bold": {"type": "boolean"},
+                "italic": {"type": "boolean"},
+                "underline": {"type": "boolean"},
+                "strikeout": {"type": "boolean"},
+                "style": {
+                    "type": "string",
+                    "enum": ["classic", "karaoke", "highlight", "underline", "word_by_word"]
+                },
+                "outline_width": {"type": "integer"},
+                "spacing": {"type": "integer"},
+                "angle": {"type": "integer"},
+                "shadow_offset": {"type": "integer"}
+            },
+            "additionalProperties": False
+        },
+        "replace": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "find": {"type": "string"},
+                    "replace": {"type": "string"}
+                },
+                "required": ["find", "replace"]
+            }
+        },
+        "webhook_url": {"type": "string", "format": "uri"},
+        "id": {"type": "string"},
+        "language": {"type": "string"}
+    },
+    "required": ["video_url"],
+    "additionalProperties": False
+})
+@queue_task_wrapper(bypass_queue=False)
+def caption_video_v1(job_id, data):
+    video_url = data['video_url']
+    captions = data.get('captions')
+    settings = data.get('settings', {})
+    replace = data.get('replace', [])
+    webhook_url = data.get('webhook_url')
+    id = data.get('id')
+    language = data.get('language', 'auto')
+
+    logger.info(f"Job {job_id}: Received v1 captioning request for {video_url}")
+    logger.info(f"Job {job_id}: Settings received: {settings}")
+    logger.info(f"Job {job_id}: Replace rules received: {replace}")
+
+    try:
+        # Do NOT combine position and alignment. Keep them separate.
+        # Just pass settings directly to process_captioning_v1.
+        # This ensures position and alignment remain independent keys.
+        
+        # Process video with the enhanced v1 service
+        output = process_captioning_v1(video_url, captions, settings, replace, job_id, language)
+        
+        if isinstance(output, dict) and 'error' in output:
+            # Check if this is a font-related error by checking for 'available_fonts' key
+            if 'available_fonts' in output:
+                # Font error scenario
+                return {"error": output['error'], "available_fonts": output['available_fonts']}, "/v1/video/caption", 400
+            else:
+                # Non-font error scenario, do not return available_fonts
+                return {"error": output['error']}, "/v1/video/caption", 400
+
+        # If processing was successful, output is the file path
+        output_path = output
+        logger.info(f"Job {job_id}: Captioning process completed successfully")
+
+        # Upload the captioned video
+        cloud_url = upload_file(output_path)
+        logger.info(f"Job {job_id}: Captioned video uploaded to cloud storage: {cloud_url}")
+
+        # Clean up the output file after upload
+        os.remove(output_path)
+        logger.info(f"Job {job_id}: Cleaned up local output file")
+
+        return cloud_url, "/v1/video/caption", 200
+
+    except Exception as e:
+        logger.error(f"Job {job_id}: Error during captioning process - {str(e)}", exc_info=True)
+        return {"error": str(e)}, "/v1/video/caption", 500
+
+===== /Users/indrajagadeeshdurla/Downloads/no-code-architects-toolkit-main/routes/v1/video/concatenate.py =====
+
+from flask import Blueprint
+from app_utils import *
+import logging
+from services.v1.video.concatenate import process_video_concatenate
+from services.authentication import authenticate
+from services.cloud_storage import upload_file
+
+v1_video_concatenate_bp = Blueprint('v1_video_concatenate', __name__)
+logger = logging.getLogger(__name__)
+
+@v1_video_concatenate_bp.route('/v1/video/concatenate', methods=['POST'])
+@authenticate
+@validate_payload({
+    "type": "object",
+    "properties": {
+        "video_urls": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "video_url": {"type": "string", "format": "uri"}
+                },
+                "required": ["video_url"]
+            },
+            "minItems": 1
+        },
+        "webhook_url": {"type": "string", "format": "uri"},
+        "id": {"type": "string"}
+    },
+    "required": ["video_urls"],
+    "additionalProperties": False
+})
+@queue_task_wrapper(bypass_queue=False)
+def combine_videos(job_id, data):
+    media_urls = data['video_urls']
+    webhook_url = data.get('webhook_url')
+    id = data.get('id')
+
+    logger.info(f"Job {job_id}: Received combine-videos request for {len(media_urls)} videos")
+
+    try:
+        output_file = process_video_concatenate(media_urls, job_id)
+        logger.info(f"Job {job_id}: Video combination process completed successfully")
+
+        cloud_url = upload_file(output_file)
+        logger.info(f"Job {job_id}: Combined video uploaded to cloud storage: {cloud_url}")
+
+        return cloud_url, "/v1/video/concatenate", 200
+
+    except Exception as e:
+        logger.error(f"Job {job_id}: Error during video combination process - {str(e)}")
+        return str(e), "/v1/video/concatenate", 500
