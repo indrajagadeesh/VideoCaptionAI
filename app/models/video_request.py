@@ -6,6 +6,7 @@ class VideoRequest(BaseModel):
     video_url: Optional[HttpUrl] = None
     video_path: Optional[str] = None
     recordId: Optional[str] = None
+    subtitle_style: str = Field(default="classic", description="Subtitle style for ASS file.")
     language: str = Field(default="en", description="Language code for Whisper.")
     webhook_url: Optional[HttpUrl] = None
     ass_settings: AssSettings = AssSettings()
@@ -15,6 +16,7 @@ class VideoRequest(BaseModel):
             "example": {
                 "video_url": "https://example.com/video.mp4",
                 "recordId": "abc123",
+                "subtitle_style": "classic",
                 "language": "en",
                 "webhook_url": "https://example.com/mywebhook",
                 "ass_settings": {

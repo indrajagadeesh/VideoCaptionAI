@@ -51,7 +51,7 @@ def caption_video(req: VideoRequest):
             json.dump(transcription, f, indent=2)
 
         # 4) Build ASS
-        ass_data = convert_json_to_ass(transcription, request_data.ass_settings)
+        ass_data = convert_json_to_ass(transcription, request_data.ass_settings, request_data.subtitle_style)
         ass_path = temp_file_path("ass", record_id, job_id, "ass")
         with open(ass_path, "w", encoding="utf-8") as f:
             f.write(ass_data)
